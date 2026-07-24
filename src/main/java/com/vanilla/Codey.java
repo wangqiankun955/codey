@@ -4,7 +4,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.vanilla.compact.MessageCompactor;
+import com.vanilla.compact.BudgetMessageCompactor;
+import com.vanilla.compact.SnipMessageCompactor;
 import com.vanilla.content.Prompt;
 import com.vanilla.hook.HookContext;
 import com.vanilla.hook.HookDispatcher;
@@ -103,7 +104,8 @@ public class Codey {
         int roundsSinceTodo = 0;
         while (true) {
 
-            MessageCompactor.toolResultBudget(history);
+            BudgetMessageCompactor.toolResultBudget(history);
+            SnipMessageCompactor.snipCompact(history);
 
             if (roundsSinceTodo >= 3) {
                 history.add(UserMessage.from("<reminder>Update your todos.</reminder>"));
