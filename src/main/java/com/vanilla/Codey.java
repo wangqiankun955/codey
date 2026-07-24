@@ -1,68 +1,171 @@
 package com.vanilla;
 
+import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
-import java.util.Scanner;
+
+import com.vanilla.compact.MessageCompactor;
+import com.vanilla.content.Prompt;
+import com.vanilla.hook.HookContext;
+import com.vanilla.hook.HookDispatcher;
+import com.vanilla.hook.HookEvent;
+import com.vanilla.hook.HookResult;
+import com.vanilla.tool.Tool;
+import com.vanilla.tool.ToolManager;
+import com.vanilla.util.ConsoleRenderer;
+
+import org.jline.reader.EndOfFileException;
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.reader.UserInterruptException;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
 
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.openai.OpenAiChatModel;
-import dev.langchain4j.model.openai.internal.chat.Message;
 import dev.langchain4j.model.output.FinishReason;
 
-/**
- * Hello world!
- *
- */
 public class Codey {
 
-    static List<ChatMessage> history = new ArrayList<>();
+    private final List<ChatMessage> history = new ArrayList<>();
+    private final ConsoleRenderer console = new ConsoleRenderer(System.out);
+    private final Terminal terminal;
+    private final LineReader lineReader;
 
-    static Scanner sc = new Scanner(System.in);
+    public Codey() {
+        // 让子 Agent 等没有直接持有 console 的组件也能拿到同一个渲染器。
+        ConsoleRenderer.setShared(console);
+        try {
+            terminal = TerminalBuilder.builder().system(true).build();
+            lineReader = LineReaderBuilder.builder().terminal(terminal).build();
+        } catch (IOException e) {
+            throw new IllegalStateException("无法初始化终端输入", e);
+        }
+    }
 
-    static OpenAiChatModel client = OpenAiChatModel.builder()
+    private final OpenAiChatModel client = OpenAiChatModel.builder()
             .apiKey("sk-cp-RZhJK2wUGo-b2m18glB-pAyIG6X2-phMbLOSKFiONzBgW16K68UVoU3B7Ir7VOwo02KzJHyr5v6Uijst-jl4Lfx0XCjsVHtDbjFOP_k6FWRJxvDAnSzgbBc")
             .baseUrl("https://api.minimaxi.com/v1")
             .modelName("MiniMax-M3")
             .build();
 
-    public static void main(String[] args) {
-
-        System.out.println("输入问题，按q推出.");
+    private void run() {
+        console.printWelcome();
         history.add(SystemMessage.from(Prompt.SYSTEM));
-        while (true) {
-            System.out.print(">>>");
-            String input = sc.nextLine();
-            history.add(UserMessage.from(input));
-            toolAgent(history);
-            AiMessage answer = ((AiMessage) history.get(history.size() - 1));
-            System.out.println(answer.text());
-        }
 
+        try {
+            while (true) {
+                String input;
+                try {
+                    input = lineReader.readLine(console.promptText());
+                } catch (UserInterruptException e) {
+                    lineReader.getBuffer().clear();
+                    continue;
+                } catch (EndOfFileException e) {
+                    console.printGoodbye();
+                    return;
+                }
+
+                if ("exit".equals(input.strip())) {
+                    console.printGoodbye();
+                    return;
+                }
+                HookResult hookResult = HookDispatcher.dispatch(HookEvent.UserPromptSubmit, HookContext.from(input));
+                if (!hookResult.continueRun()) {
+                    console.printWarning(hookResult.getMsg());
+                }
+                history.add(UserMessage.from(input));
+                console.printThinking();
+
+                try {
+                    AiMessage answer = this.agentLoop(history, input);
+                    console.printAiMessage(answer.text());
+                } catch (RuntimeException e) {
+                    console.printError(readableError(e));
+                }
+            }
+        } finally {
+            try {
+                terminal.close();
+            } catch (IOException ignored) {
+                // 进程退出时终端已经由 JLine 恢复；关闭失败不应覆盖原始结果。
+            }
+        }
     }
 
-    private static void toolAgent(List<ChatMessage> history) {
-
+    private AiMessage agentLoop(List<ChatMessage> history, String userInput) {
+        int roundsSinceTodo = 0;
         while (true) {
-            ChatResponse response = client.chat(ChatRequest.builder()
-                .toolSpecifications(Tools.tools())
-                .messages(history)
-                .build());
-                
-            history.add(response.aiMessage());
-            if (!FinishReason.TOOL_EXECUTION.equals(response.finishReason())) {
-                break;
+
+            MessageCompactor.toolResultBudget(history);
+
+            if (roundsSinceTodo >= 3) {
+                history.add(UserMessage.from("<reminder>Update your todos.</reminder>"));
             }
-            
-            response.aiMessage().toolExecutionRequests().forEach(toolExeRequest -> {
-                System.out.println(toolExeRequest.name());
-                String arguments = toolExeRequest.arguments();
+
+            ChatResponse response = client.chat(ChatRequest.builder()
+                    .toolSpecifications(ToolManager.toolSpecifications())
+                    .messages(history)
+                    .build());
+
+            AiMessage aiMessage = response.aiMessage();
+            history.add(aiMessage);
+            if (!FinishReason.TOOL_EXECUTION.equals(response.finishReason())) {
+                HookDispatcher.dispatch(HookEvent.Stop, HookContext.builder().history(history).build());
+                return aiMessage;
+            }
+            roundsSinceTodo++;
+            aiMessage.toolExecutionRequests().forEach(toolExeReq -> {
+                Tool tool = ToolManager.handler(toolExeReq.name());
+                if (tool == null) {
+                    String message = "未找到对应工具: " + toolExeReq.name();
+                    console.printToolCall(toolExeReq.name(), toolExeReq.arguments());
+                    console.printToolResult(toolExeReq.name(), message, 0L, false);
+                    history.add(ToolExecutionResultMessage.from(toolExeReq, message));
+                    return;
+                }
+
+                HookResult result = HookDispatcher.dispatch(HookEvent.PreToolUse,
+                        HookContext.builder().userPrompt(userInput).toolUseRequest(List.of(toolExeReq)).build());
+                if (!result.continueRun()) {
+                    // Hook 已自行渲染拦截卡片，这里不再重复打印。
+                    history.add(ToolExecutionResultMessage.from(toolExeReq, result.getMsg()));
+                    return;
+                }
+
+                console.printToolCall(toolExeReq.name(), toolExeReq.arguments());
+                long startMillis = System.currentTimeMillis();
+                String toolResult;
+                try {
+                    toolResult = tool.execute(toolExeReq);
+                } catch (RuntimeException e) {
+                    toolResult = "Error: tool execution failed: " + readableError(e);
+                }
+                long elapsedMillis = System.currentTimeMillis() - startMillis;
+                boolean success = toolResult != null && !toolResult.startsWith("Error:");
+                console.printToolResult(toolExeReq.name(), toolResult, elapsedMillis, success);
+                console.printMessageState(history);
+                history.add(ToolExecutionResultMessage.from(toolExeReq, toolResult));
             });
         }
+    }
+
+    private static String readableError(RuntimeException error) {
+        String message = error.getMessage();
+        if (message == null || message.isBlank()) {
+            return "请求 AI 时发生未知错误，请稍后重试。";
+        }
+        return "请求 AI 失败：" + message;
+    }
+
+    public static void main(String[] args) {
+        Codey codey = new Codey();
+        codey.run();
     }
 }

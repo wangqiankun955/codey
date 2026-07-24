@@ -21,9 +21,28 @@
   <dependencies>
 
     <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <version>1.18.38</version>
+    </dependency>
+
+    <dependency>
+      <groupId>info.picocli</groupId>
+      <artifactId>picocli</artifactId>
+      <version>4.7.7</version>
+    </dependency>
+
+
+    <dependency>
       <groupId>cn.hutool</groupId>
       <artifactId>hutool-json</artifactId>
       <version>5.8.36</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.jline</groupId>
+      <artifactId>jline</artifactId>
+      <version>3.26.3</version>
     </dependency>
 
     <dependency>
@@ -32,6 +51,7 @@
       <version>4.11</version>
       <scope>test</scope>
     </dependency>
+
     <dependency>
         <groupId>dev.langchain4j</groupId>
         <artifactId>langchain4j-open-ai</artifactId>
